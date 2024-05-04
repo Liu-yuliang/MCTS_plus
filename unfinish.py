@@ -482,17 +482,28 @@ class BatchedMCTS():
         node_children_prior = self._children_prior[self._batch_range, node_indices, :] # (B, A)
         node_children_values = self._children_values[self._batch_range, node_indices, :] # (B, A)
         node_children_visits = self._children_visits[self._batch_range, node_indices, :] # (B, A)
+        #此处存储origin scores
+        node_children_scores = self._origin_scores[self._batch_range, node_indices, :]
         node_visits = self._visit_counts[self._batch_range, node_indices] # (B)
-        node_policy_score = np.sqrt(node_visits[:, None]) * self._pb_c_init * node_children_prior / (node_children_visits + 1) # (B, A)
-        
+        #PUCT计算公式
+        node_puct_policy_score = np.sqrt(node_visits[:, None]) * self._pb_c_init * node_children_prior / (node_children_visits + 1) # (B, A)
+        #UCB计算公式
+        node_ucb_policy_score = np.sqrt(2 * np.log(node_visits[:, None]) / node_children_visits) * self._pb_c_init
+        #UCT计算公式
+        node_uct_policy_score = np.sqrt()
         # Remap values between 0 and 1.
-        node_value_score = node_children_values 
+        #children value要除以子节点的访问次数,即win rate,此时的value = win rate + origin score
+        node_win_rate = node_children_values / node_children_visits
+        node_value_score = node_children_scores + node_win_rate
+        #node_value_score = node_children_values
         # node_value_score = (node_value_score != 0.) * node_value_score + (node_value_score == 0.) * self._adaptive_min_values[:, None]
         # node_value_score = (node_value_score - self._adaptive_min_values[:, None]) / (self._adaptive_max_values[:, None] - self._adaptive_min_values[:, None])
         
         # 根据PUCT，node_value_score少除了子节点的访问次数？（存疑）
-        node_uct_score = node_value_score + node_policy_score # (B, A)
-        actions = np.argmax(node_uct_score, axis=1)
+        node_puct_score = node_value_score + node_puct_policy_score # (B, A)
+        node_ucb_score = node_value_score + node_ucb_policy_score
+        node_uct_score = node_win_rate + np.sqrt(self._pb_c_init * np.log(node_visits[:, None]) / node_children_visits)
+        actions = np.argmax(node_puct_score, axis=1)
         return actions
 
     def get_states_from_node(self, b, n, d): 
@@ -668,14 +679,17 @@ class BatchedMCTS():
             """
                 以下公式对应node的两种情况：
                 非root：
-                note 的父结点 value = (父节点value * 父节点以前的visit次数 + leaf_values) / (父节点以前的visit次数 + 1)
+                node 的父结点 value = (父节点value * 父节点以前的visit次数 + leaf_values) / (父节点以前的visit次数 + 1)
                 意义其实是每次参观得到value的均值
                 root:
                 不变，根节点的parents也是0
             """
-            self._values[self._batch_range, parents] = not_root_mask * (self._values[self._batch_range, parents] *
-                self._visit_counts[self._batch_range, parents] + leaf_values) / (self._visit_counts[self._batch_range,
-                parents] + 1.0) + root_mask * self._values[self._batch_range, parents]
+
+            #反向传播将leaf node 的value进行反向传播
+            self._values[self._batch_range, parents] = not_root_mask * (self._values[self._batch_range, parents] + leaf_values)
+            #self._values[self._batch_range, parents] = not_root_mask * (self._values[self._batch_range, parents] *
+                #self._visit_counts[self._batch_range, parents] + leaf_values) / (self._visit_counts[self._batch_range,
+                #parents] + 1.0) + root_mask * self._values[self._batch_range, parents]
             
             # self._values[self._batch_range, parents] = not_root_mask * (np.maximum(self._values[self._batch_range, parents],leaf_values)) + root_mask * self._values[self._batch_range, parents]
             
@@ -684,7 +698,9 @@ class BatchedMCTS():
             # 对于node_indices中非root结点，它们是从父节点哪一个action中得来
             actions = np.where(is_root, 0, self._action_from_parents[self._batch_range, node_indices])
             # 对于非root结点，它们的父结点的孩子值更新，根节点没有父节点
-            self._children_values[self._batch_range, parents, actions] = not_root_mask * self._values[self._batch_range,node_indices] + root_mask * self._children_values[self._batch_range, parents, actions]
+            # child node的value也进行更新
+            self._children_values[self._batch_range, parents, actions] = not_root_mask * (self._children_values[self._batch_range, parents, actions] + leaf_values)
+            #self._children_values[self._batch_range, parents, actions] = not_root_mask * self._values[self._batch_range, node_indices] + root_mask * self._children_values[self._batch_range, parents, actions]
             # 对于非root结点，它们的父结点的孩子visit次数+1
             self._children_visits[self._batch_range, parents, actions] += not_root_mask_int
             # Go up
