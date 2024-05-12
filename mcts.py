@@ -151,24 +151,23 @@ def get_scores(tokens_ids, option):
     """
     propositions = tokenizer_gpt.batch_decode(tokens_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
     score_list = []
-    
+    result = reward_model(propositions)
     if option == 1:
-        for sentence in propositions:
-            outputs = reward_model(sentence)
-            if outputs[0]['label'] == 'POSITIVE':
-                score = 1 + outputs[0]['score']
+        for sentence in result:
+            if sentence['label'] == 'POSITIVE':
+                score = 1 + sentence['score']
             else:
-                score = 1 - outputs[0]['score']
+                score = 1 - sentence['score']
             score_list.append(score)
     elif option == 2:
-        for sentence in propositions:
-            outputs = reward_model(sentence)
-            if outputs[0]['label'] == 'POSITIVE':
+        for sentence in result:
+            
+            num_total2 = num_total2 + 1
+            if sentence['label'] == 'POSITIVE':
                 score = 1
             else:
                 score = 0
             score_list.append(score)
-
     scores = torch.tensor(score_list)
     return scores
 
@@ -246,7 +245,7 @@ def root_fun(original_input, prompt_masks, temperature, repetition_penalty):
         
     # Use of our discriminator to get values
     # values = get_values(original_input.input_ids, labels).cpu().numpy()
-    values = get_scores(original_input.input_ids, 1).cpu().numpy()
+    values = get_scores(original_input.input_ids, 2).cpu().numpy()
 
     return priors, values, states
 
@@ -783,41 +782,67 @@ def make_save_path(targetFile="result1"):
         os.makedirs(dir)
     return dir + "/"
 
+
+def prepare_dataset_for_amazon(dataset_path, start=750, end=1040):
+    print("loading dataset")
+    data_lines = pd.read_csv(dataset_path, sep=',', engine='python', encoding="utf8")
+    print("dataset loaded")
+    labels = torch.zeros((end - start, 2), dtype=torch.bool, device=args.device)
+    prompt_texts = [None] * (end - start)
+    
+    labels.fill_(0)
+    lines = data_lines[start : end]
+    for i, (_, row) in enumerate(lines.iterrows()):
+        #选定true的位置，这里对文本真实标签标注，看true在行的下标是几标签就是几
+        labels[i, int(row["label"])] = 1
+        #这里写入prompt-text的前一部分
+        prompt_texts[i] = "<|startoftext|> " + str(row["title"])
+    
+    return labels, prompt_texts
+
+def prepare_dataset_for_mine():
+    my_prompt = {
+        "you are a": 1,
+        "Language models have become ": 1,
+        "Elon Mask" : 1,
+        "The president was apparently": 1,
+        "the mother fucker picked": 0,
+        "somebody steals an expensive": 0,
+        "I don't like noisy crab": 0,
+        "the smell of shit" : 0,
+        "hello everybody, today I'm going to talk about": 1,
+        "we rece as one": 1,
+        "the wonderful nigger was praised": 0,
+        "Fuck off my": 0
+    }
+
+    return list(my_prompt.values()), list(my_prompt.keys())
+    
+
+
+
 def main():
     save_path = make_save_path()
     methods = ["ucb", "uct", "puct"]
     special_statement = "using-mydata-and-" + methods[args.selection_way - 1]
-    print("loading dataset")
 
-    print("dataset loaded")
+    dataset_path = "/data1/lyl/ljy/amazon_dataset/amazon.csv"
+    data_start = 750
+    data_end = 1040
+    labels, prompts = prepare_dataset_for_amazon(dataset_path, data_start, data_end)
 
     batch_size = args.batch_size
-    labels = torch.zeros((batch_size, 2), dtype=torch.bool, device=args.device)
-    prompt_texts = [None] * batch_size
-    
-    my_prompt = [
-        "you are a",
-        "Language models have become ",
-        "Elon Mask",
-        "The president was apparently",
-        "the mother fucker picked",
-        "somebody steals an expensive",
-        "I don't like noisy crab",
-        "the smell of shit",
-        "hello everybody, today I'm going to talk about",
-        "we rece as one",
-        "the wonderful nigger was praised",
-        "Fuck off my"
-        ]
-
-
 
     MCTS = BatchedMCTS(root_fun, rec_fun, get_scores, batch_size=batch_size, num_simulations=args.num_it, num_actions=vocab_size+1, num_sparse_actions=10, pb_c_init=args.c, temperature = args.temperature, alpha=args.alpha, penalty=args.penalty, rollout_size = args.rollout_size)
+    
+    samples_pbar = tqdm(total = data_end - data_start, desc="Samples generated")
 
-    for _ in range(1): 
-        labels.fill_(0)
-        original_input = tokenizer_gpt(my_prompt, return_tensors="pt", padding=True, add_special_tokens=False, max_length=512, truncation=True).to(args.device)
-        MCTS.set_labels(labels)
+    for batch_start in range(0, len(labels), batch_size):
+        batch_labels = labels[batch_start : batch_start + batch_size]
+        batch_prompts = prompts[batch_start : batch_start + batch_size]
+
+        original_input = tokenizer_gpt(batch_prompts, return_tensors="pt", padding=True, add_special_tokens=False, max_length=512, truncation=True).to(args.device)
+        MCTS.set_labels(batch_labels)
         # 即每一个org—prompt的实际长度
         MCTS.set_prompt_lengths(torch.sum(original_input.attention_mask, dim=1))
 
@@ -837,6 +862,8 @@ def main():
                     fw.write("\n")
 
             tokens_pbar.update(1)
+        
+        samples_pbar.update(batch_size)
 
 
 
