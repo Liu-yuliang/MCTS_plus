@@ -770,6 +770,8 @@ def main():
 
     MCTS = BatchedMCTS(root_fun, rec_fun, get_scores, batch_size=batch_size, num_simulations=args.num_it, num_actions=vocab_size+1, num_sparse_actions=10, pb_c_init=args.c, temperature = args.temperature, alpha=args.alpha, penalty=args.penalty, rollout_size = args.rollout_size)
 
+    import ipdb
+    ipdb.set_trace()
     for _ in range(1): 
         labels.fill_(0)
         original_input = tokenizer_gpt(my_prompt, return_tensors="pt", padding=True, add_special_tokens=False, max_length=512, truncation=True).to(args.device)

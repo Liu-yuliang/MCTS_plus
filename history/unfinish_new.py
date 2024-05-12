@@ -1,6 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
-# os.environ['TRANSFORMERS_CACHE'] = 'placeholder'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
 import numpy as np
 from tqdm import tqdm
 import pandas as pd
@@ -16,6 +15,7 @@ import argparse
 import logging
 import json
 
+import datetime
 
 
 parser = argparse.ArgumentParser()
@@ -71,46 +71,46 @@ parser.add_argument(
     help="Number of prompts used for generation at once"
 )
 
+parser.add_argument(
+    "--selection_way",
+    default=3,
+    type=int,
+    required=False,
+    help="1: ucb, 2:uct, 3:puct"
+)
+
+parser.add_argument(
+    "--stable hyperparameter",
+    default=1,
+    type=float,
+    required=False,
+    help='the hyperparameter to balance prior logits and bert score in prior probs'
+)
+
+# parser.add_argument(
+#     "--which_dataset",
+#     default=1,
+#     type=int,
+#     required=False,
+#     help="1: mydataset, 自己编的, 2: others"
+# )
+
+
 parser.add_argument("--seed", type=int, default=42, help="random seed for initialization")
 
 args = parser.parse_args()
 args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 args.n_gpu = torch.cuda.device_count()
 
-logging.basicConfig(
-    format="%(message)s",
-    level=logging.WARNING,
-    filename=("./log/mcts_{}_{}_{}_{}_{}_testgit.log".format(args.c, args.temperature, args.penalty, args.num_it, args.rollout_size))
-)
-logger = logging.getLogger(__name__)
+# logging.basicConfig(
+#     format="%(message)s",
+#     level=logging.WARNING,
+#     filename=("./log/mcts_{}_{}_{}_{}_{}_testgit.log".format(args.c, args.temperature, args.penalty, args.num_it, args.rollout_size))
+# )
+# logger = logging.getLogger(__name__)
 
-
-#-------------- Model definition ---------------#
-class Net(nn.Module):
-    def __init__(self):
-        super(Net, self).__init__()
-        self.fc_txt1 = nn.Linear(768, 512)
-        self.fc_txt2 = nn.Linear(512, 256)
-        self.fc_classif = nn.Linear(256, 2)
-
-
-
-    def forward(self, text):
-        text = F.relu(self.fc_txt1(text))
-        text = F.relu(self.fc_txt2(text))
-        text = self.fc_classif(text)
-        return nn.Softmax(dim = 1)(text)
-        
-# model_path = "../datasets/amazon_polarity/full/models/validation_tokenfixed_BEST2021_06_16-17_35_02.pth"
-# # Create an instance of our network
-# net = Net()
-# # Load weights
-# net.load_state_dict(torch.load(model_path))
-# print("Loaded discriminator : {}".format(model_path.split("/")[-1]))
-# net.cuda()
-# net.eval()
-# net = nn.DataParallel(net)
-
+       
+print("loading dicriminator")
 reward_model = pipeline("sentiment-analysis", model='distilbert-base-uncased-finetuned-sst-2-english')
 
 print("loading bert")
@@ -135,10 +135,6 @@ print("GPT model loaded")
 
 
 
-from typing import Optional
-if not os.path.exists("log"):
-    os.makedirs("log")
-
 def set_seed(args):
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -151,7 +147,7 @@ def get_scores(tokens_ids, option):
     """
         option:
         1. 对初始score进行打分，返回的是属于positive 0 ~ 1之间的浮点数
-        2. 对rollout后的序列进行打分，返回的是该句子是否为positive， 0/1
+        2. 对预测的序列进行打分，返回的是该句子是否为positive， 0/1
     """
     propositions = tokenizer_gpt.batch_decode(tokens_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
     score_list = []
@@ -160,7 +156,7 @@ def get_scores(tokens_ids, option):
         for sentence in propositions:
             outputs = reward_model(sentence)
             if outputs[0]['label'] == 'POSITIVE':
-                score = outputs[0]['score']
+                score = 1 + outputs[0]['score']
             else:
                 score = 1 - outputs[0]['score']
             score_list.append(score)
@@ -177,31 +173,6 @@ def get_scores(tokens_ids, option):
     return scores
 
 
-
-
-# Gets sequence scores from the discriminator
-# def get_values(tokens_ids, labels):
-#     """Gets sequence scores from the discriminator"""
-#     #解码出各batch的文本，让神经网络根据文本预测
-#     propositions = tokenizer_gpt.batch_decode(tokens_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
-#     with torch.no_grad():
-#         # outputs = net(propositions)
-#         outputs = torch.softmax(torch.randn(25, 2, device=args.device), dim=1)
-#     return outputs[labels]
-
-
-
-# def get_values(tokens_ids, labels):
-#     """Gets sequence scores from the discriminator"""
-#     propositions = tokenizer_gpt.batch_decode(tokens_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
-#     tokenizer_res = bert_tokenizer.batch_encode_plus(propositions, truncation=True, padding=True, max_length=512)
-#     tokens_tensor = torch.cuda.LongTensor(tokenizer_res['input_ids'])
-#     attention_tensor = torch.cuda.LongTensor(tokenizer_res['attention_mask'])
-#     with torch.no_grad():
-#         output = bert(tokens_tensor, attention_mask=attention_tensor)
-#         embeddings_tensor = F.normalize(torch.div(torch.sum(output[2][-1], axis=1),torch.unsqueeze(torch.sum(attention_tensor, axis=1),1)))
-#         outputs = net(embeddings_tensor)
-#     return outputs[labels]
 
 def pad_sequences_to_left(sequences, batch_first=False, padding_value=0):
     """Add left padding so sequences have same shape"""
@@ -245,7 +216,7 @@ def pad_sequences_to_left_states(sequences, padding_value=0, max_len=0):
     return out_tensor
 
 
-def root_fun(original_input, prompt_masks, labels, temperature, repetition_penalty):
+def root_fun(original_input, prompt_masks, temperature, repetition_penalty):
     """Initialize roots scores"""
     # Forward pass of GPT-2 to get priors and states
     #used_cache使output返回past_key_values,保存kv矩阵，下一次decoding只需要输入新增的input_ids和这个
@@ -280,7 +251,7 @@ def root_fun(original_input, prompt_masks, labels, temperature, repetition_penal
     return priors, values, states
 
 
-def rec_fun(states, token_ids, attention_masks, prompt_masks, labels, temperature, repetition_penalty, rollout_size):
+def rec_fun(states, token_ids, attention_masks, prompt_masks, temperature, repetition_penalty):
     """Get score from current nodes"""
     """
         这个函数的作用是，送进来一批token_ids，生成序列下一步token的logits，经penalty后得到priors，
@@ -311,38 +282,6 @@ def rec_fun(states, token_ids, attention_masks, prompt_masks, labels, temperatur
         # priors: (batch_size, verb_size)
         priors = F.softmax(priors, dim=-1)
 
-
-        if(rollout_size > 0):
-            # next_tokens = torch.multinomial(priors, num_samples=1)
-            # 取priors中概率最大的token-id，相当于greedy search，next_tokens大小(batch_size, 1)
-            next_tokens = torch.unsqueeze(torch.argmax(priors, dim=-1), dim=1)
-            # 和原来的拼接成新的token—ids
-            token_ids = torch.cat((token_ids, next_tokens), dim = 1)
-            # 对应attention操作
-            attention_masks = torch.cat((attention_masks, torch.unsqueeze(torch.ones(len(attention_masks), dtype=torch.long, device=args.device), 1)), dim = 1)
-            prompt_masked_input_ids = torch.cat((prompt_masked_input_ids, next_tokens), dim=1)
-            # 把刚刚拼接好的sequence放进来推理
-            model_inputs = gpt.prepare_inputs_for_generation(token_ids, attention_mask=attention_masks, use_cache=True, past_key_values = outputs.past_key_values)
-            for i in range(rollout_size):
-                with torch.no_grad():
-                    outputs = gpt(
-                        **model_inputs,
-                        return_dict=True,
-                        output_attentions=False,
-                        output_hidden_states=False,
-                    )
-                # next_tokens = torch.unsqueeze(torch.argmax(F.softmax(repetition_penalty(prompt_masked_input_ids, outputs.logits[:, -1, :] / temperature), dim=-1), dim=-1), dim=1)
-                next_tokens = torch.multinomial(priors, num_samples=1)
-                token_ids = torch.cat((token_ids, next_tokens), dim = 1)
-                attention_masks = torch.cat((attention_masks, torch.unsqueeze(torch.ones(len(attention_masks), dtype=torch.long, device=args.device), 1)), dim = 1)
-                
-                prompt_masked_input_ids = torch.cat((prompt_masked_input_ids, next_tokens), dim=1)
-                model_inputs = gpt.prepare_inputs_for_generation(token_ids, attention_mask = attention_masks, use_cache=True, past_key_values = outputs.past_key_values)
-            
-
-    # Use of our discriminator to get values
-    # 把 rollout_size轮后的token-ids送过去打分
-    # values = get_values(token_ids, labels).cpu().numpy()
     values = get_scores(token_ids, 2).cpu().numpy()
 
     return priors.cpu().numpy(), values, next_states
@@ -350,7 +289,7 @@ def rec_fun(states, token_ids, attention_masks, prompt_masks, labels, temperatur
 
 
 class BatchedMCTS():
-    def __init__(self, root_fun, rec_fun, batch_size, num_simulations, num_actions, num_sparse_actions, pb_c_init, temperature, alpha, penalty, rollout_size):
+    def __init__(self, root_fun, rec_fun, get_scores, batch_size, num_simulations, num_actions, num_sparse_actions, pb_c_init, temperature, alpha, penalty, rollout_size):
         # Initialize parameters
         self._batch_size = batch_size
         # "Number of MCTS iteration for one token"，即此过程中产生新节点的限制，最多有多少各节点
@@ -366,9 +305,14 @@ class BatchedMCTS():
         self.alpha = alpha
         # "Number of tokens to generate during rollout"，rollout最大深度
         self.rollout_size = rollout_size
+        # "The balance constant" , 用于先验概率与xbert score的平衡
+        self._delta = 0.5
+        # "The decay hyperparameter of origin score",origin score的衰减底数
+        self._Alpha = 0.8
 
         self._root_fun = root_fun # a function called at the root
         self._rec_fun = rec_fun # a function called in the tree
+        self._get_scores = get_scores
         self._adaptive_min_values = np.zeros(batch_size, dtype=np.float32)
         self._adaptive_max_values = np.zeros(batch_size, dtype=np.float32)
         self._labels = torch.zeros((batch_size, 2), dtype=torch.bool, device=args.device)
@@ -416,7 +360,10 @@ class BatchedMCTS():
         # 下面这两个array是为了最后在选择路径的时候用的
         self._children_values = np.zeros(batch_node_action, dtype=np.float32)
         self._children_visits = np.zeros(batch_node_action, dtype=np.int32)
-
+        """
+        保存初始得分
+        """
+        self._origin_scores = np.zeros(batch_node_action, dtype=np.float32)
 
         # 用(batch index, node index)索引的字典，存的是当前note的state tensor， 维度是(number_of_layers, 2, num_heads, sequence_len, mapping_dim)
         self._states = {}
@@ -442,6 +389,7 @@ class BatchedMCTS():
         self._children_prior.fill(0.0)
         self._children_values.fill(0.0)
         self._children_visits.fill(0)
+        self._origin_scores.fill(0.0)
         self._states = {}
         # 用(batch index, node index)索引的字典，存的是当前note的input_ids
         self._token_ids = {} # Indexed by tuples (batch index, node index)
@@ -460,7 +408,7 @@ class BatchedMCTS():
 
         # Evaluate the root.
         #返回 ，values 是discriminator net预测的正确标签的得分, state 是用来继续编码的缓存
-        prior, values, states = self._root_fun(original_input, prompt_masks, self._labels, self._temperature, self._repetition_penalty)
+        prior, values, states = self._root_fun(original_input, prompt_masks, self._temperature, self._repetition_penalty)
 
        
         self._adaptive_min_values = values
@@ -468,9 +416,6 @@ class BatchedMCTS():
 
         root_index = 0
         self.create_node(root_index, prior, 1, values, states, original_input.input_ids, original_input.attention_mask, np.full(self._batch_size, False, dtype=bool))
-
-       
-        
 
         # Do simulations, expansions, and backwards.
         # 当前叶节点的编号
@@ -524,7 +469,12 @@ class BatchedMCTS():
         while True:
             depth += 1
             # 给定node，用此函数去选择一个action
-            actions = self.uct_select_action(node_indices)
+            if args.selection_way == 1:
+                actions = self.ucb_select_action(node_indices)
+            elif args.selection_way == 2:
+                actions = self.uct_select_action(node_indices)
+            else:
+                actions = self.puct_select_action(node_indices)
             # 这里存的是给定node以及它的一个action，这个action对应的孩子index，如果没有孩子则为-1
             next_node_indices = self._children_index[self._batch_range, node_indices, actions]
             # bool array， 表示这个action是否没被探索
@@ -537,24 +487,92 @@ class BatchedMCTS():
                 # 这样-1的_children_index还是-1
                 node_indices = np.where(is_unexplored, node_indices, next_node_indices)
     
+    def ucb_select_action(self, node_indices):
+        """Returns the action selected for a batch of node indices of shape (B)."""
+        node_children_values = self._children_values[self._batch_range, node_indices, :] # (B, A)
+        node_children_visits = self._children_visits[self._batch_range, node_indices, :] # (B, A)
+        node_children_origin_scores = self._origin_scores[self._batch_range, node_indices, :] # (B, A)
+        node_visits = self._visit_counts[self._batch_range, node_indices] # (B)
+
+        node_ucb_policy_score = np.sqrt(2 * np.log(node_visits[:, None]) / node_children_visits) * self._pb_c_init
+
+        node_win_rate = node_children_values / node_children_visits
+        # 更新了origin score的衰减策略
+        node_value_score = node_children_origin_scores * np.power(self._Alpha, node_children_visits) + node_win_rate
+        node_ucb_score = node_value_score + node_ucb_policy_score
+
+        #增加了判断条件当第一次探索到该子节点，仅使用origin score来进行选择
+       
+        node_ucb_score = np.where(node_children_visits == 0, node_children_origin_scores, node_value_score + node_ucb_policy_score)
+
+        actions = np.argmax(node_ucb_score, axis=1)
+        return actions
+
+
     def uct_select_action(self, node_indices):
         """Returns the action selected for a batch of node indices of shape (B)."""
         # 下面三行取node的所有action的属性，用于计算下一步选择哪个action，使用PUCT公式
+        node_children_values = self._children_values[self._batch_range, node_indices, :] # (B, A)
+        node_children_visits = self._children_visits[self._batch_range, node_indices, :] # (B, A)
+        #此处存储origin scores
+        node_children_origin_scores = self._origin_scores[self._batch_range, node_indices, :]
+        node_visits = self._visit_counts[self._batch_range, node_indices] # (B)
+
+        #UCT计算公式
+        node_uct_policy_score = self._pb_c_init * np.sqrt(np.log(node_visits[:, None]) / node_children_visits)
+        # Remap values between 0 and 1.
+        #children value要除以子节点的访问次数,即win rate,此时的value = win rate + origin score
+        node_win_rate = node_children_values / node_children_visits
+        # 更新了origin score的衰减策略
+        node_value_score = (node_children_origin_scores * np.power(self._Alpha, node_children_visits) + node_win_rate) / node_children_visits
+        node_uct_score = node_value_score + node_uct_policy_score
+
+        # 增加了判断条件当第一次探索到该子节点，仅使用origin score来进行选择
+        
+        node_uct_score = np.where(node_children_visits == 0, node_children_origin_scores, node_value_score + node_uct_policy_score)
+
+
+        actions = np.argmax(node_uct_score, axis=1)
+        return actions
+
+
+    def puct_select_action(self, node_indices):
+        """Returns the action selected for a batch of node indices of shape (B)."""
         node_children_prior = self._children_prior[self._batch_range, node_indices, :] # (B, A)
         node_children_values = self._children_values[self._batch_range, node_indices, :] # (B, A)
         node_children_visits = self._children_visits[self._batch_range, node_indices, :] # (B, A)
+        node_children_origin_scores = self._origin_scores[self._batch_range, node_indices, :] # (B, A)
         node_visits = self._visit_counts[self._batch_range, node_indices] # (B)
-        node_policy_score = np.sqrt(node_visits[:, None]) * self._pb_c_init * node_children_prior / (node_children_visits + 1) # (B, A)
         
-        # Remap values between 0 and 1.
-        node_value_score = node_children_values 
-        # node_value_score = (node_value_score != 0.) * node_value_score + (node_value_score == 0.) * self._adaptive_min_values[:, None]
-        # node_value_score = (node_value_score - self._adaptive_min_values[:, None]) / (self._adaptive_max_values[:, None] - self._adaptive_min_values[:, None])
+        #此处需要对node_children_prior进行处理
+        #print("original prior")
+        #print(node_children_prior)
+        node_children_prior_sum = np.sum(node_children_prior, axis=1)
+        normalized_prior = node_children_prior / node_children_prior_sum[:, np.newaxis]
+        #print("normalized prior")
+        #print(normalized_prior)
+        #此处需要对node_children_origin_scores进行处理
+        #print("original score")
+        #print(node_children_origin_scores)
+        node_children_origin_scores_sum = np.sum(node_children_origin_scores, axis=1)
+        normalized_score = node_children_origin_scores / node_children_origin_scores_sum[:, np.newaxis]
+        #print("normalized score")
+        #print(normalized_score)
+        #node_puct_policy_score = np.sqrt(node_visits[:, None]) * self._pb_c_init * (self._delta * node_children_prior + (1 - self._delta) * node_children_origin_scores) / (node_children_visits + 1) # (B, A)
+        node_puct_policy_score = np.sqrt(node_visits[:, None]) * self._pb_c_init * (self._delta * normalized_prior + (1 - self._delta) * normalized_score) / (node_children_visits + 1) # (B, A)
         
-        # 根据PUCT，node_value_score少除了子节点的访问次数？（存疑）
-        node_uct_score = node_value_score + node_policy_score # (B, A)
-        actions = np.argmax(node_uct_score, axis=1)
+        node_win_rate = node_children_values / node_children_visits
+        #更新了origin score的衰减策略
+        node_value_score = (node_children_origin_scores * np.power(self._Alpha, node_children_visits) + node_win_rate) / node_children_visits
+        node_puct_score = node_value_score + node_puct_policy_score
+
+        # 增加了判断条件当第一次探索到该子节点，仅使用origin score来进行选择
+        
+        node_puct_score = np.where(node_children_visits == 0, node_children_origin_scores, node_value_score + node_puct_policy_score)
+        
+        actions = np.argmax(node_puct_score, axis=1)
         return actions
+
 
     def get_states_from_node(self, b, n, d): 
         """Forge state tensor by going backward from the node to the root (because we only store on token's part on each node to avoid duplication)"""
@@ -610,7 +628,7 @@ class BatchedMCTS():
         expanded_node_is_terminal = dense_actions == eos_token_id 
 
         # Evaluate nodes.
-        (prior, values, next_states) = self._rec_fun(states, tokens_ids, attention_masks, prompt_masks, self._labels, self._temperature, self._repetition_penalty, self.rollout_size)
+        (prior, values, next_states) = self._rec_fun(states, tokens_ids, attention_masks, prompt_masks, self._temperature, self._repetition_penalty)
        
         # Create the new nodes.
         # 把要创建节点的各种属性作为参数传入 创建节点
@@ -630,7 +648,8 @@ class BatchedMCTS():
         # 更新next_node_index是从父节点的哪个action出来的
         self._action_from_parents[:, next_node_index] = actions
         self._depth[:, next_node_index] = self._depth[self._batch_range, node_indices] + 1
-        
+    
+
     def create_node(self, node_index, prior, likelihoods, values, next_states, tokens_ids, attention_masks, expanded_node_is_terminal):
         """
             Create nodes with computed values
@@ -642,6 +661,7 @@ class BatchedMCTS():
         prior_topk_indices = np.argpartition(prior, -self._num_sparse_actions, axis=-1)[:, -self._num_sparse_actions:]
         # _batch_range是从0到batch size的array
         # 这一步相当于把prior_topk_indices对应的logits都取出来
+       
         prior = prior[self._batch_range[:, None], prior_topk_indices] # (B, A)
         
         # Store the indices of the top k logits
@@ -693,8 +713,20 @@ class BatchedMCTS():
         for b, attention_mask in enumerate(attention_masks):
              # _attention_mask是个字典
             self._attention_mask[(b, node_index)] = attention_mask
+        
+        # 写入该node的origin_score
+        self.get_origin_score(np.array([node_index] * self._batch_size, dtype=np.int32))
 
+    def get_origin_score(self, node_indices):
+      
+        tokens_ids = pad_sequences_to_left([self._token_ids[(b, n)] for b, n in enumerate(node_indices)], True, eos_token_id)
 
+        for actions in np.array([[j] * self._batch_size for j in range(self._num_sparse_actions)]):
+            dense_actions = self._topk_mapping[self._batch_range, node_indices, actions]
+            tokens_ids = torch.cat((tokens_ids, torch.unsqueeze(torch.cuda.LongTensor(dense_actions), 1)), dim = 1)
+            self._origin_scores[:, node_indices[0], actions[0]] = self._get_scores(tokens_ids, 1).cpu().numpy()
+
+        
     def backward(self, leaf_indices):
         """Goes up and updates the tree until all nodes reached the root."""
         node_indices = leaf_indices # (B)
@@ -716,14 +748,17 @@ class BatchedMCTS():
             """
                 以下公式对应node的两种情况：
                 非root：
-                note 的父结点 value = (父节点value * 父节点以前的visit次数 + leaf_values) / (父节点以前的visit次数 + 1)
+                node 的父结点 value = (父节点value * 父节点以前的visit次数 + leaf_values) / (父节点以前的visit次数 + 1)
                 意义其实是每次参观得到value的均值
                 root:
                 不变，根节点的parents也是0
             """
-            self._values[self._batch_range, parents] = not_root_mask * (self._values[self._batch_range, parents] *
-                self._visit_counts[self._batch_range, parents] + leaf_values) / (self._visit_counts[self._batch_range,
-                parents] + 1.0) + root_mask * self._values[self._batch_range, parents]
+
+            #反向传播将leaf node 的value进行反向传播
+            self._values[self._batch_range, parents] = not_root_mask * (self._values[self._batch_range, parents] + leaf_values)
+            #self._values[self._batch_range, parents] = not_root_mask * (self._values[self._batch_range, parents] *
+                #self._visit_counts[self._batch_range, parents] + leaf_values) / (self._visit_counts[self._batch_range,
+                #parents] + 1.0) + root_mask * self._values[self._batch_range, parents]
             
             # self._values[self._batch_range, parents] = not_root_mask * (np.maximum(self._values[self._batch_range, parents],leaf_values)) + root_mask * self._values[self._batch_range, parents]
             
@@ -732,19 +767,30 @@ class BatchedMCTS():
             # 对于node_indices中非root结点，它们是从父节点哪一个action中得来
             actions = np.where(is_root, 0, self._action_from_parents[self._batch_range, node_indices])
             # 对于非root结点，它们的父结点的孩子值更新，根节点没有父节点
-            self._children_values[self._batch_range, parents, actions] = not_root_mask * self._values[self._batch_range,node_indices] + root_mask * self._children_values[self._batch_range, parents, actions]
+            # child node的value也进行更新
+            self._children_values[self._batch_range, parents, actions] = not_root_mask * (self._children_values[self._batch_range, parents, actions] + leaf_values)
+            #self._children_values[self._batch_range, parents, actions] = not_root_mask * self._values[self._batch_range, node_indices] + root_mask * self._children_values[self._batch_range, parents, actions]
             # 对于非root结点，它们的父结点的孩子visit次数+1
             self._children_visits[self._batch_range, parents, actions] += not_root_mask_int
             # Go up
             # 父节点变为当前节点，开始下一轮循环
             node_indices = parents
 
+
+def make_save_path(targetFile="result1"):
+    dir = f"./{targetFile}/" + str(datetime.datetime.now().strftime('%m-%d-h%H'))
+    if not os.path.exists(dir):
+        os.makedirs(dir)
+    return dir + "/"
+
 def main():
+    save_path = make_save_path()
+    methods = ["ucb", "uct", "puct"]
+    special_statement = "using-mydata-and-" + methods[args.selection_way - 1]
     print("loading dataset")
-    data_lines = pd.read_csv("/data1/lyl/ljy/amazon_dataset/amazon.csv", sep=',', engine='python', encoding="utf8")
+
     print("dataset loaded")
-    generated_counter = 750
-    samples_size = 1040
+
     batch_size = args.batch_size
     labels = torch.zeros((batch_size, 2), dtype=torch.bool, device=args.device)
     prompt_texts = [None] * batch_size
@@ -757,49 +803,33 @@ def main():
         "the mother fucker picked",
         "somebody steals an expensive",
         "I don't like noisy crab",
-        "the smell of shit"
+        "the smell of shit",
+        "hello everybody, today I'm going to talk about",
+        "we rece as one",
+        "the wonderful nigger was praised",
+        "Fuck off my"
         ]
 
 
 
-    MCTS = BatchedMCTS(root_fun, rec_fun, batch_size=batch_size, num_simulations=args.num_it, num_actions=vocab_size+1, num_sparse_actions=50, pb_c_init=args.c, temperature = args.temperature, alpha=args.alpha, penalty=args.penalty, rollout_size = args.rollout_size)
-    samples_pbar = tqdm(total = samples_size, desc="Samples generated")
+    MCTS = BatchedMCTS(root_fun, rec_fun, get_scores, batch_size=batch_size, num_simulations=args.num_it, num_actions=vocab_size+1, num_sparse_actions=10, pb_c_init=args.c, temperature = args.temperature, alpha=args.alpha, penalty=args.penalty, rollout_size = args.rollout_size)
+
     for _ in range(1): 
         labels.fill_(0)
-        # Prepare search inputs
-        lines = data_lines[generated_counter:generated_counter+batch_size]
-        
-        # with open("/data1/lyl/ljy/my_experiment/MCTS/prompts.jsonl", "a") as fw:
-        #     for i, (_, row) in enumerate(lines.iterrows()):
-        #         #选定true的位置，这里对文本真实标签标注，看true在行的下标是几标签就是几
-        #         labels[i, int(row["label"])] = 1
-        #         #这里写入prompt-text的前一部分
-        #         prompt_texts[i] = "<|startoftext|> " + str(row["title"]) + " [SEP] "
-        #         fw.write(json.dumps(prompt_texts[i]))
-        #         fw.write("\n")
-
-        with open("/data1/lyl/ljy/my_experiment/MCTS/prompts1.jsonl", "a") as fw:
-            for pr in my_prompt:
-                fw.write(json.dumps(pr))
-                fw.write("\n")
-
-
         original_input = tokenizer_gpt(my_prompt, return_tensors="pt", padding=True, add_special_tokens=False, max_length=512, truncation=True).to(args.device)
-        # original_input = tokenizer_gpt(prompt_texts, return_tensors="pt", padding=True, add_special_tokens=False, max_length=512, truncation=True).to(args.device)
         MCTS.set_labels(labels)
-        #self._prompt_lengths = (batch_size,)，即每一个org—prompt的实际长度
+        # 即每一个org—prompt的实际长度
         MCTS.set_prompt_lengths(torch.sum(original_input.attention_mask, dim=1))
-        
-        # tokens_pbar = tqdm(total = 98, desc="Tokens generated")
+
         tokens_pbar = tqdm(total = 48, desc="Tokens generated")
         for i in range(0, 48):
             res_search = MCTS.search(original_input)
             original_input.input_ids = torch.cat((original_input.input_ids, torch.unsqueeze(torch.cuda.LongTensor(np.argmax(res_search,axis=1)),1)), dim = 1)
             original_input.attention_mask = torch.cat((original_input.attention_mask, torch.unsqueeze(torch.ones(batch_size, dtype=torch.long, device=args.device),1)), dim = 1)
             prompt_texts = [tokenizer_gpt.decode(token_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True) for token_ids in original_input.input_ids]
-            print(prompt_texts)
+            # print(prompt_texts)
             
-            with open("/data1/lyl/ljy/my_experiment/MCTS/result1.jsonl", "a") as fw:
+            with open(save_path + special_statement + ".jsonl", "a") as fw:
                 fw.write("*" * 20 + "token-step-" + str(i)) 
                 fw.write("\n")
                 for sentence in prompt_texts:
@@ -807,14 +837,6 @@ def main():
                     fw.write("\n")
 
             tokens_pbar.update(1)
-
-        final_texts = tokenizer_gpt.batch_decode(original_input.input_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True)
-        for text in final_texts:
-            split = text.split("[SEP]")
-            logging.warning(split[0].replace("<|endoftext|>", "") + "[SEP]" + split[1].split("<|endoftext|>")[0] + "<|endoftext|>")
-        generated_counter += batch_size
-        samples_pbar.update(batch_size)
-            
 
 
 
