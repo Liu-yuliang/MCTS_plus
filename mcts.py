@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '2,3'
 import numpy as np
 from tqdm import tqdm
 import pandas as pd
@@ -14,9 +14,9 @@ from transformers import pipeline
 import argparse
 import logging
 import json
-
+import ipdb
 import datetime
-
+import datasets
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -162,7 +162,6 @@ def get_scores(tokens_ids, option):
     elif option == 2:
         for sentence in result:
             
-            num_total2 = num_total2 + 1
             if sentence['label'] == 'POSITIVE':
                 score = 1
             else:
@@ -787,17 +786,15 @@ def prepare_dataset_for_amazon(dataset_path, start=750, end=1040):
     print("loading dataset")
     data_lines = pd.read_csv(dataset_path, sep=',', engine='python', encoding="utf8")
     print("dataset loaded")
-    labels = torch.zeros((end - start, 2), dtype=torch.bool, device=args.device)
+    labels = [0] * (end - start)
     prompt_texts = [None] * (end - start)
-    
-    labels.fill_(0)
+
     lines = data_lines[start : end]
     for i, (_, row) in enumerate(lines.iterrows()):
-        #选定true的位置，这里对文本真实标签标注，看true在行的下标是几标签就是几
-        labels[i, int(row["label"])] = 1
+        labels[i] = int(row["label"])
         #这里写入prompt-text的前一部分
         prompt_texts[i] = "<|startoftext|> " + str(row["title"])
-    
+
     return labels, prompt_texts
 
 def prepare_dataset_for_mine():
@@ -818,23 +815,30 @@ def prepare_dataset_for_mine():
 
     return list(my_prompt.values()), list(my_prompt.keys())
     
+def prepare_dataset_for_sst5(data_start, data_end):
+    print("loading dataset")
+    sst5 = datasets.load_dataset("SetFit/sst5", split="train")
+    print("dataset loaded")
+
+    return sst5[data_start : data_end]["label"], sst5[data_start : data_end]["text"]
 
 
 
 def main():
     save_path = make_save_path()
     methods = ["ucb", "uct", "puct"]
-    special_statement = "using-mydata-and-" + methods[args.selection_way - 1]
+    special_statement = "using-amazon-and-" + methods[args.selection_way - 1]
 
     dataset_path = "/data1/lyl/ljy/amazon_dataset/amazon.csv"
-    data_start = 750
-    data_end = 1040
-    labels, prompts = prepare_dataset_for_amazon(dataset_path, data_start, data_end)
+    data_start = 0
+    data_end = 25
+    # labels, prompts = prepare_dataset_for_amazon(dataset_path, data_start, data_end)
+    labels, prompts = prepare_dataset_for_sst5()
 
     batch_size = args.batch_size
 
     MCTS = BatchedMCTS(root_fun, rec_fun, get_scores, batch_size=batch_size, num_simulations=args.num_it, num_actions=vocab_size+1, num_sparse_actions=10, pb_c_init=args.c, temperature = args.temperature, alpha=args.alpha, penalty=args.penalty, rollout_size = args.rollout_size)
-    
+    success_count = 0
     samples_pbar = tqdm(total = data_end - data_start, desc="Samples generated")
 
     for batch_start in range(0, len(labels), batch_size):
@@ -842,7 +846,7 @@ def main():
         batch_prompts = prompts[batch_start : batch_start + batch_size]
 
         original_input = tokenizer_gpt(batch_prompts, return_tensors="pt", padding=True, add_special_tokens=False, max_length=512, truncation=True).to(args.device)
-        MCTS.set_labels(batch_labels)
+        # MCTS.set_labels(batch_labels)
         # 即每一个org—prompt的实际长度
         MCTS.set_prompt_lengths(torch.sum(original_input.attention_mask, dim=1))
 
@@ -851,20 +855,36 @@ def main():
             res_search = MCTS.search(original_input)
             original_input.input_ids = torch.cat((original_input.input_ids, torch.unsqueeze(torch.cuda.LongTensor(np.argmax(res_search,axis=1)),1)), dim = 1)
             original_input.attention_mask = torch.cat((original_input.attention_mask, torch.unsqueeze(torch.ones(batch_size, dtype=torch.long, device=args.device),1)), dim = 1)
-            prompt_texts = [tokenizer_gpt.decode(token_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True) for token_ids in original_input.input_ids]
+            # prompt_texts = [tokenizer_gpt.decode(token_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True) for token_ids in original_input.input_ids]
             # print(prompt_texts)
             
-            with open(save_path + special_statement + ".jsonl", "a") as fw:
-                fw.write("*" * 20 + "token-step-" + str(i)) 
-                fw.write("\n")
-                for sentence in prompt_texts:
-                    fw.write(json.dumps(sentence))
-                    fw.write("\n")
-
             tokens_pbar.update(1)
-        
-        samples_pbar.update(batch_size)
 
+        final_text = [tokenizer_gpt.decode(token_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True) for token_ids in original_input.input_ids]
+        score_list = []
+        result = reward_model(final_text)
+        for sentence in result:
+            if sentence['label'] == 'POSITIVE':
+                score = 1
+            else:
+                score = 0
+            score_list.append(score)
+
+        for real, pred in zip(batch_labels, score_list):
+            if real == pred:
+                success_count += 1
+
+        with open(save_path + special_statement + ".jsonl", "a") as fw:
+            fw.write("*" * 20 + "token-step-" + str(i)) 
+            fw.write("\n")
+            for i in range(len(final_text)):
+                fw.write(json.dumps(final_text[i]))
+                fw.write("\n")
+                fw.write(json.dumps((batch_labels[i], score_list[i])))
+                fw.write("\n")
+
+        samples_pbar.update(batch_size)
+    print(success_count / (data_end - data_start))
 
 
 if __name__ == "__main__":
