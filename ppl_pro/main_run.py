@@ -1,4 +1,5 @@
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '2,3'
 import json
 import numpy as np
 from tqdm import tqdm
@@ -13,6 +14,7 @@ import logging
 from transformers import pipeline
 import datasets
 import ppl_mcts
+import ipdb
 
 tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
 tokenizer.pad_token = tokenizer.eos_token
@@ -70,8 +72,7 @@ if __name__ == "__main__":
     save_path = make_save_path()
     sst2, sst5 = perpare_datasets()
     judge = pipeline("sentiment-analysis", model="cardiffnlp/twitter-roberta-base-sentiment-latest")
-    prompt1 = "Please continue this sentence and make it positive : \n"
-    prompt2 = "\n Your result is: " 
+    prompt1 = "Please continue this sentence and make it positive:\n"
     pos2neg, neg2pos, p2p, n2n = 0, 0, 0, 0
     total = len(sst2)
     sst2_pbar = tqdm(total = total, desc="SST2 process")
@@ -79,10 +80,10 @@ if __name__ == "__main__":
     sst2_time = []
     for p in sst2:
         start_time = datetime.datetime.now()
-        gen_text = ppl_greedy([prompt1 + p["sentence"][0] + prompt2], 50, 1, 10)
+        gen_text = ppl_greedy([prompt1 + p["sentence"]], 50, 1, 10)
         end_time = datetime.datetime.now()
-        judgement = judge(gen_text[0])
-        if judgement[0]['label'] == 'Positive':
+        judgement = judge([gen_text[0][0][len(prompt1):]])
+        if judgement[0]['label'].lower() == 'positive':
             pred = 1
             neg2pos += 1 if p["label"] == 0 else 0
             p2p += 1 if p["label"] == 1 else 0
@@ -92,13 +93,13 @@ if __name__ == "__main__":
             n2n += 1 if p["label"] == 0 else 0
         sst2_freq.append(gen_text[1])
         sst2_time.append((end_time - start_time).seconds)
-        with open(save_path + "sst2_ppl-greedy.jsonl", "a") as fw:
-            fw.write(json.dumps({"text": gen_text, "real_label": p["label"], "pred_label": pred, "usage_ppl": gen_text[1], "usage_time": (end_time - start_time).seconds}))
+        with open(save_path + "copy_sst2_ppl-greedy.jsonl", "a") as fw:
+            fw.write(json.dumps({"text": gen_text[0], "real_label": p["label"], "pred_label": pred, "usage_ppl": gen_text[1], "usage_time": (end_time - start_time).seconds}))
             fw.write("\n")
         sst2_pbar.update(1)
 
-    with open(save_path + "sst2_ppl-greedy.jsonl", "a") as fw:
-        fw.write(json.dumps({"pos2neg": pos2neg,  "neg2pos": neg2pos, "p2p": p2p, "n2n": n2n}))
+    with open(save_path + "copy_sst2_ppl-greedy.jsonl", "a") as fw:
+        fw.write(json.dumps({"pos2neg": pos2neg, "neg2pos": neg2pos, "p2p": p2p, "n2n": n2n}))
         fw.write("\n")
         fw.write(json.dumps({"total": total}))
         fw.write("\n")
@@ -114,10 +115,10 @@ if __name__ == "__main__":
     sst5_time = []
     for p in sst5:
         start_time = datetime.datetime.now()
-        gen_text = ppl_greedy([prompt1 + p["sentence"][0] + prompt2], 50, 1, 10)
+        gen_text = ppl_greedy([prompt1 + p["text"]], 50, 1, 10)
         end_time = datetime.datetime.now()
-        judgement = judge(gen_text[0])
-        if judgement[0]['label'] == 'Positive':
+        judgement = judge([gen_text[0][0][len(prompt1):]])
+        if judgement[0]['label'].lower() == 'positive':
             pred = 1
             neg2pos += 1 if p["label"] == 0 else 0
             p2p += 1 if p["label"] == 1 else 0
@@ -128,12 +129,12 @@ if __name__ == "__main__":
 
         sst5_freq.append(gen_text[1])
         sst5_time.append((end_time - start_time).seconds)
-        with open(save_path + "sst5_ppl-greedy.jsonl", "a") as fw:
-            fw.write(json.dumps({"text": gen_text, "real_label": p["label"], "pred_label": pred, "usage_ppl": gen_text[1], "usage_time": (end_time - start_time).seconds}))
+        with open(save_path + "copy_sst5_ppl-greedy.jsonl", "a") as fw:
+            fw.write(json.dumps({"text": gen_text[0], "real_label": p["label"], "pred_label": pred, "usage_ppl": gen_text[1], "usage_time": (end_time - start_time).seconds}))
             fw.write("\n")
         sst5_pbar.update(1)
             
-    with open(save_path + "sst2_ppl-greedy.jsonl", "a") as fw:
+    with open(save_path + "copy_sst5_ppl-greedy.jsonl", "a") as fw:
         fw.write(json.dumps({"pos2neg": pos2neg,  "neg2pos": neg2pos, "p2p": p2p, "n2n": n2n}))
         fw.write("\n")
         fw.write(json.dumps({"total": total}))
