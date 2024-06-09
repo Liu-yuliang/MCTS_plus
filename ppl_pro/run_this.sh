@@ -1,0 +1,1 @@
+python3 main_run.py --dataset "sst5" --description "default_setting"

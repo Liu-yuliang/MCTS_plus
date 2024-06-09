@@ -10,87 +10,16 @@ import torch.nn.functional as F
 
 from transformers import GPT2LMHeadModel, GPT2TokenizerFast, RepetitionPenaltyLogitsProcessor, BertTokenizer, BertModel
 
-import argparse
+import arguments
 import logging
 from transformers import pipeline
 
+args = arguments.get_args()
 
-parser = argparse.ArgumentParser()
-parser.add_argument(
-    "--c",
-    default=8,
-    type=float,
-    # required=True,
-    help="The exploration constant (c_puct)"
-)
-parser.add_argument(
-    "--alpha",
-    default=1,
-    type=float,
-    help="The parameter that guide the exploration toward likelihood or value"
-)
-parser.add_argument(
-    "--temperature",
-    default=1.2,
-    type=float,
-    # required=True,
-    help="Temperature when calculating priors"
-)
-
-parser.add_argument(
-    "--penalty",
-    default=1.0,
-    type=float,
-    help="Penalty factor to apply to repetitions"
-)
-
-parser.add_argument(
-    "--num_it",
-    default=50,
-    type=int,
-    required=False,
-    help="Number of MCTS iteration for one token"
-)
-
-parser.add_argument(
-    "--rollout_size",
-    default=5,
-    type=int,
-    required=False,
-    help="Number of tokens to generate during rollout"
-)
-
-parser.add_argument(
-    "--batch_size",
-    default=5,
-    type=int,
-    required=False,
-    help="Number of prompts used for generation at once"
-)
-
-parser.add_argument("--seed", type=int, default=42, help="random seed for initialization")
-
-args = parser.parse_args()
 args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 args.n_gpu = torch.cuda.device_count()
 
 
-#-------------- Model definition ---------------#
-class Net(nn.Module):
-    def __init__(self):
-        super(Net, self).__init__()
-        self.fc_txt1 = nn.Linear(768, 512)
-        self.fc_txt2 = nn.Linear(512, 256)
-        self.fc_classif = nn.Linear(256, 2)
-
-
-
-    def forward(self, text):
-        text = F.relu(self.fc_txt1(text))
-        text = F.relu(self.fc_txt2(text))
-        text = self.fc_classif(text)
-        return nn.Softmax(dim = 1)(text)
-        
 reward_model = pipeline("sentiment-analysis", model='distilbert-base-uncased-finetuned-sst-2-english')
 
 
@@ -252,7 +181,6 @@ def rec_fun(states, token_ids, attention_masks, prompt_masks, temperature, repet
     values = get_values(token_ids).cpu().numpy()
 
     return priors.cpu().numpy(), values, next_states
-
 
 
 class BatchedMCTS():
@@ -540,6 +468,7 @@ class BatchedMCTS():
             self._children_visits[self._batch_range, parents, actions] += not_root_mask_int
             # Go up
             node_indices = parents
+
 
 def mcts_search(prompt_texts):
     batch_size = 1

@@ -827,13 +827,13 @@ def prepare_dataset_for_sst5(data_start, data_end):
 def main():
     save_path = make_save_path()
     methods = ["ucb", "uct", "puct"]
-    special_statement = "using-amazon-and-" + methods[args.selection_way - 1]
+    special_statement = "using-sst5-and-" + methods[args.selection_way - 1]
 
     dataset_path = "/data1/lyl/ljy/amazon_dataset/amazon.csv"
     data_start = 0
     data_end = 25
     # labels, prompts = prepare_dataset_for_amazon(dataset_path, data_start, data_end)
-    labels, prompts = prepare_dataset_for_sst5()
+    labels, prompts = prepare_dataset_for_sst5(data_start, data_end)
 
     batch_size = args.batch_size
 
