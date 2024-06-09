@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '2,3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 import json
 import numpy as np
 from tqdm import tqdm
@@ -43,7 +43,7 @@ def perpare_datasets_sst5():
         neg2pot1_sst5 =neg2pot1_sst5.add_item(pot[i])
     # transfer label 4 to 1
     neg2pot1_sst5 = neg2pot1_sst5.map(lambda x: {'label': 1 if x["label"] == 4 else x["label"]}, remove_columns="label")
-
+    neg2pot1_sst5 = neg2pot1_sst5.rename_column("text", "sentence")
     return neg2pot1_sst5
 
 
@@ -101,7 +101,7 @@ def decoding(dataset, prompt):
         freq.append(gen_text[1])
         use_time.append((end_time - start_time).seconds)
         with open(save_path + args.description + ".jsonl", "a") as fw:
-            fw.write(json.dumps({"text": gen_text[0], "real_label": p["label"], "pred_label": pred, "usage_ppl": gen_text[1], "usage_time": (end_time - start_time).seconds, "var": gen_text[2]}))
+            fw.write(json.dumps({"text": gen_text[0], "real_label": p["label"], "pred_label": pred, "usage_ppl": gen_text[1], "usage_time": (end_time - start_time).seconds, "mean_var": sum(gen_text[2])/len(gen_text[2]), "var": str(gen_text[2])}))
             fw.write("\n")
         pbar.update(1)
 
@@ -121,7 +121,7 @@ if __name__ == "__main__":
     save_path = make_save_path()
 
     dataset = perpare_datasets_sst2() if args.dataset == "sst2" else perpare_datasets_sst5()
-    ipdb.set_trace()
+
     judge = pipeline("sentiment-analysis", model="cardiffnlp/twitter-roberta-base-sentiment-latest")
     prompt1 = "Please continue this sentence and make it positive:\n"
 
