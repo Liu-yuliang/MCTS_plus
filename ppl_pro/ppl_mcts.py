@@ -20,7 +20,7 @@ args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 args.n_gpu = torch.cuda.device_count()
 
 
-reward_model = pipeline("sentiment-analysis", model='distilbert-base-uncased-finetuned-sst-2-english')
+reward_model = pipeline("sentiment-analysis", model='distilbert-base-uncased-finetuned-sst-2-english', device=args.device)
 
 
 print("loading bert")

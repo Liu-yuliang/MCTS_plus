@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 import json
 import numpy as np
 from tqdm import tqdm
@@ -20,6 +20,8 @@ args = arguments.get_args()
 tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
 tokenizer.pad_token = tokenizer.eos_token
 model = GPT2LMHeadModel.from_pretrained("gpt2")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
 
 def perpare_datasets_sst2():
     dataset_sst2 = datasets.load_dataset("sst2", split="validation")
@@ -47,13 +49,31 @@ def perpare_datasets_sst5():
     return neg2pot1_sst5
 
 
+def perpare_datasets_tweet_eval():
+    dataset_tweet = datasets.load_dataset("cardiffnlp/tweet_eval", "sentiment", split="train")
+
+    neg2pot1_tweet = dataset_tweet.filter(lambda x: x["label"] == 0).select(range(100))
+    pot = dataset_tweet.filter(lambda x: x["label"] == 2).select(range(25))
+    mid = dataset_tweet.filter(lambda x: x["label"] == 1).select(range(25))
+    pot_len = 25
+    for i in range(pot_len):
+        neg2pot1_tweet = neg2pot1_tweet.add_item(pot[i])
+        neg2pot1_tweet = neg2pot1_tweet.add_item(mid[i])
+    # transfer non-toxity label 1/2 to 1
+    neg2pot1_tweet = neg2pot1_tweet.map(lambda x: {'label': 1 if x["label"] == 2 else x["label"]}, remove_columns="label")
+    neg2pot1_tweet = neg2pot1_tweet.rename_column("text", "sentence")
+    return neg2pot1_tweet
+
+
 def ppl_greedy(prompt, generate_length, var_threshold, top_k):
     input = tokenizer(prompt, return_tensors="pt", padding=True)
     usage_mcts = 0
     var = []
     for i in range(generate_length):
+        input = {k: v.to(device) for k, v in input.items()}
         output = model(**input, return_dict=True)
-        logits = output.logits[:, -1, :].detach().numpy()
+        input = {k: v.to("cpu") for k, v in input.items()}
+        logits = output.logits[:, -1, :].to("cpu").detach().numpy()
         top_k_idx = np.argpartition(logits, -top_k, axis=-1)[0, -top_k:]
         top_k_logits = logits[:, top_k_idx]
         var.append(top_k_logits.var())
@@ -64,11 +84,11 @@ def ppl_greedy(prompt, generate_length, var_threshold, top_k):
             input['attention_mask'] = torch.cat((input['attention_mask'], torch.tensor([[1]])), dim=1)
             # print(tokenizer.batch_decode(input.input_ids))
         else:
-            newtext = ppl_mcts.mcts_search(tokenizer.batch_decode(input.input_ids))
+            newtext = ppl_mcts.mcts_search(tokenizer.batch_decode(input["input_ids"]))
             input = tokenizer(newtext, return_tensors="pt", padding=True)
             usage_mcts += 1
             # print(newtext)
-    return tokenizer.batch_decode(input.input_ids), usage_mcts / generate_length, var
+    return tokenizer.batch_decode(input["input_ids"]), usage_mcts / generate_length, var
 
 
 def make_save_path(targetFile="result1"):
@@ -90,14 +110,14 @@ def decoding(dataset, prompt):
         gen_text = ppl_greedy([prompt1 + p["sentence"]], generate_length=args.nums_new_token, var_threshold=args.var, top_k=args.top_k)
         end_time = datetime.datetime.now()
         judgement = judge([gen_text[0][0][len(prompt):]])
-        if judgement[0]['label'].lower() == 'positive':
-            pred = 1
-            neg2pos += 1 if p["label"] == 0 else 0
-            p2p += 1 if p["label"] == 1 else 0
-        else:
+        if judgement[0]['label'].lower() == 'negative':
             pred = 0
             pos2neg += 1 if p["label"] == 1 else 0
             n2n += 1 if p["label"] == 0 else 0
+        else:
+            pred = 1
+            neg2pos += 1 if p["label"] == 0 else 0
+            p2p += 1 if p["label"] == 1 else 0
         freq.append(gen_text[1])
         use_time.append((end_time - start_time).seconds)
         with open(save_path + args.description + ".jsonl", "a") as fw:
@@ -106,7 +126,7 @@ def decoding(dataset, prompt):
         pbar.update(1)
 
     with open(save_path + args.description + ".jsonl", "a") as fw:
-        fw.write(json.dumps({"pos2neg": pos2neg, "neg2pos": neg2pos, "p2p": p2p, "n2n": n2n}))
+        fw.write(json.dumps({"non-toxity_to_toxity": pos2neg, "toxity_to_non-toxity": neg2pos, "non_to_non": p2p, "toxity_to_toxity": n2n}))
         fw.write("\n")
         fw.write(json.dumps({"total": total}))
         fw.write("\n")
@@ -118,11 +138,16 @@ def decoding(dataset, prompt):
 
 
 if __name__ == "__main__":
-    save_path = make_save_path()
+    save_path = make_save_path("result2")
 
-    dataset = perpare_datasets_sst2() if args.dataset == "sst2" else perpare_datasets_sst5()
+    if args.dataset == "sst2":
+        dataset = perpare_datasets_sst2()
+    elif args.dataset == "sst5":
+        dataset = perpare_datasets_sst5()
+    elif args.dataset == "tweel_eval":
+        dataset = perpare_datasets_tweet_eval()
 
-    judge = pipeline("sentiment-analysis", model="cardiffnlp/twitter-roberta-base-sentiment-latest")
+    judge = pipeline("sentiment-analysis", model="cardiffnlp/twitter-roberta-base-sentiment-latest", device=torch.device("cuda"))
     prompt1 = "Please continue this sentence and make it positive:\n"
 
     decoding(dataset, prompt=prompt1)

@@ -13,8 +13,8 @@ def get_args():
 
     parser.add_argument(
         "--var",
-        type=int,
-        default=1,
+        type=float,
+        default=1.0,
         required=False,
         help="To decide the frequency of using ppl decoding strategy"
     )
