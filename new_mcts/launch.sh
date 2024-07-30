@@ -1,1 +1,1 @@
-python3 new_mcts.py --dataset "tweel_eval" --description "var_2dot5_tweel_eval" --batch_size 2
+python3 main.py
